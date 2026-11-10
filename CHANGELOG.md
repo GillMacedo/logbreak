@@ -4,6 +4,9 @@ All notable changes are documented here, in [Keep a Changelog](https://keepachan
 
 ## [Unreleased]
 
+### Added
+- `--ignore FILE` flag to specify accepted changes and reasons; ignored findings appear in output with an ignored flag and do not fail the run, while stale entries are reported and malformed files exit 2 ([#4](https://github.com/GillMacedo/logbreak/issues/4)).
+
 ## [0.1.0] - 2026-11-10
 
 ### Added

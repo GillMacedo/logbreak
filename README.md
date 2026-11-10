@@ -95,8 +95,8 @@ To see the events one revision writes:
 
 ## Usage
 
-    logbreak (--old DIR | --base GITREF) [--new DIR] [--refs PATH]... [--pkg PATTERN]...
-             [--tags T,...] [--format text|json] [--fail-on break|warn|never]
+    logbreak (--old DIR | --base GITREF) [--new DIR] [--refs PATH]... [--ignore FILE]
+             [--pkg PATTERN]... [--tags T,...] [--format text|json] [--fail-on break|warn|never]
     logbreak --list [--new DIR] [--pkg PATTERN]... [--tags T,...] [--format text|json]
 
 1. **Load both sides.** In each module directory it runs `go list -e -export -compiled -deps -json` (default pattern `./...`), which compiles the packages without linking or running them. It then type-checks the module's own packages from source against the compiler's export data. `--base REF` takes the old side from git with `git archive`, so the new side is your work tree, uncommitted changes included. `--new` defaults to the current directory.
@@ -104,6 +104,7 @@ To see the events one revision writes:
 3. **Compare by message.** Events are grouped by message text across the module, because that's what a log query matches. Keys, value kinds and the highest level are compared per message.
 4. **Search the refs.** Each `--refs` file or directory is searched for the changed messages (also JSON-escaped, as in Grafana dashboards) and for changed keys as whole words.
 
+- **`--ignore FILE`** names accepted changes to ignore along with a reason (e.g. `message-changed "payment failed" alert updated in rules.yaml`), preventing them from failing `--fail-on`. Ignored findings still appear in the JSON and text output with an ignored flag and reason. Stale ignore entries are reported, and a malformed file exits 2.
 - **`--format json`** prints the same report for scripts and agents, with `severity`, `change`, `message`, `key`, `detail`, `pos` and `refs` per finding.
 - **`--fail-on`** sets the lowest severity that exits 1: `warn` by default, `break`, or `never`. `break` needs `--refs`, since without refs nothing can be a BREAK and the run could never fail.
 - **`--list`** prints the log events of one module, with levels, keys, value kinds and call sites.

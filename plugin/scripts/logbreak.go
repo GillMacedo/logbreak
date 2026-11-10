@@ -80,6 +80,8 @@ type options struct {
 	tags           string
 	pkgs           []string
 	refs           []string
+	ignoreFile     string
+	ignoreRules    []*ignoreRule
 	format         string
 	failOn         string
 	list           bool
@@ -105,13 +107,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fl.StringVar(&o.tags, "tags", "", "build tags passed to go list, comma separated")
 	fl.Var(&pkgs, "pkg", "package pattern to check, relative to the module (repeatable, default ./...)")
 	fl.Var(&refs, "refs", "file or directory of alert rules, dashboards or saved queries to search for changed messages and keys (repeatable)")
+	fl.StringVar(&o.ignoreFile, "ignore", "", "file of accepted changes to ignore")
 	fl.StringVar(&o.format, "format", "text", "output format: text or json")
 	fl.StringVar(&o.failOn, "fail-on", "warn", "lowest severity that exits 1: break, warn or never")
 	fl.BoolVar(&o.list, "list", false, "print the log events of --new (or the current directory) and exit")
 	showVersion := fl.Bool("version", false, "print the version and exit")
 	fl.Usage = func() {
-		fmt.Fprintf(stderr, "usage: logbreak (--old DIR | --base GITREF) [--new DIR] [--refs PATH]... [--pkg PATTERN]...\n")
-		fmt.Fprintf(stderr, "                [--tags T,...] [--format text|json] [--fail-on break|warn|never]\n")
+		fmt.Fprintf(stderr, "usage: logbreak (--old DIR | --base GITREF) [--new DIR] [--refs PATH]... [--ignore FILE]\n")
+		fmt.Fprintf(stderr, "                [--pkg PATTERN]... [--tags T,...] [--format text|json] [--fail-on break|warn|never]\n")
 		fmt.Fprintf(stderr, "       logbreak --list [--new DIR] [--pkg PATTERN]... [--tags T,...] [--format text|json]\n\n")
 		fl.PrintDefaults()
 	}
@@ -139,8 +142,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		o.newDir = "."
 	}
 	if o.list {
-		if o.oldDir != "" || o.base != "" || len(o.refs) > 0 {
-			fmt.Fprintln(stderr, "logbreak: --list reads one side; use --new DIR, not --old, --base or --refs")
+		if o.oldDir != "" || o.base != "" || len(o.refs) > 0 || o.ignoreFile != "" {
+			fmt.Fprintln(stderr, "logbreak: --list reads one side; use --new DIR, not --old, --base, --refs or --ignore")
 			return 2
 		}
 		if err := listEvents(o, stdout); err != nil {
@@ -157,6 +160,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if (o.oldDir == "") == (o.base == "") {
 		fmt.Fprintln(stderr, "logbreak: give exactly one of --old DIR or --base GITREF")
 		return 2
+	}
+	if o.ignoreFile != "" {
+		rules, err := loadIgnoreFile(o.ignoreFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "logbreak: %v\n", err)
+			return 2
+		}
+		o.ignoreRules = rules
 	}
 	rep, err := compare(o)
 	if err != nil {
@@ -181,7 +192,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	for _, f := range rep.Findings {
-		if sevRank(f.Severity) >= sevRank(o.failOn) {
+		if !f.Ignored && sevRank(f.Severity) >= sevRank(o.failOn) {
 			return 1
 		}
 	}
@@ -1400,6 +1411,201 @@ func looksLikeBuildLine(l, marker string) bool {
 	return strings.HasPrefix(l, strings.TrimSpace(marker)) || strings.HasPrefix(t, marker)
 }
 
+var validChanges = map[string]bool{
+	"message-changed": true,
+	"message-removed": true,
+	"message-added":   true,
+	"key-renamed":     true,
+	"key-removed":     true,
+	"key-added":       true,
+	"kind-changed":    true,
+	"level-raised":    true,
+	"level-lowered":   true,
+	"level-changed":   true,
+}
+
+func isKeyChange(c string) bool {
+	return strings.HasPrefix(c, "key-") || c == "kind-changed"
+}
+
+type ignoreRule struct {
+	lineNum    int
+	raw        string
+	change     string
+	msg        string
+	key        string
+	candKey    string
+	candReason string
+	fullReason string
+	matched    bool
+}
+
+func loadIgnoreFile(filePath string) ([]*ignoreRule, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, distrust("--ignore %s: %v", filePath, err)
+	}
+	if !utf8.Valid(data) {
+		return nil, distrust("--ignore %s: file is not UTF-8 text", filePath)
+	}
+	lines := strings.Split(string(data), "\n")
+	var rules []*ignoreRule
+	for i, l := range lines {
+		lineNum := i + 1
+		rule, err := parseIgnoreLine(l, lineNum)
+		if err != nil {
+			return nil, distrust("--ignore %s:%d: %v", filePath, lineNum, err)
+		}
+		if rule != nil {
+			rules = append(rules, rule)
+		}
+	}
+	return rules, nil
+}
+
+func unquotePrefix(s string) (unquoted, rest string, err error) {
+	if len(s) == 0 || s[0] != '"' {
+		return "", s, errors.New("expected '\"'")
+	}
+	var buf strings.Builder
+	escaped := false
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			switch c {
+			case 'n':
+				buf.WriteByte('\n')
+			case 't':
+				buf.WriteByte('\t')
+			case '\\':
+				buf.WriteByte('\\')
+			case '"':
+				buf.WriteByte('"')
+			default:
+				buf.WriteByte('\\')
+				buf.WriteByte(c)
+			}
+			escaped = false
+		} else if c == '\\' {
+			escaped = true
+		} else if c == '"' {
+			return buf.String(), s[i+1:], nil
+		} else {
+			buf.WriteByte(c)
+		}
+	}
+	return "", "", errors.New("unclosed quote")
+}
+
+func parseIgnoreLine(line string, lineNum int) (*ignoreRule, error) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return nil, nil
+	}
+	sp := strings.IndexAny(trimmed, " \t")
+	if sp < 0 {
+		return nil, errors.New("missing message and reason")
+	}
+	change := trimmed[:sp]
+	if !validChanges[change] {
+		return nil, fmt.Errorf("unknown change type %q", change)
+	}
+	rem := strings.TrimSpace(trimmed[sp:])
+	if rem == "" {
+		return nil, errors.New("missing message and reason")
+	}
+
+	var msg string
+	if rem[0] == '"' {
+		q, after, err := unquotePrefix(rem)
+		if err != nil {
+			return nil, fmt.Errorf("invalid quoted message: %v", err)
+		}
+		msg = q
+		rem = strings.TrimSpace(after)
+	} else {
+		nextSp := strings.IndexAny(rem, " \t")
+		if nextSp < 0 {
+			return nil, errors.New("missing reason")
+		}
+		msg = rem[:nextSp]
+		rem = strings.TrimSpace(rem[nextSp:])
+	}
+
+	if rem == "" {
+		return nil, errors.New("missing reason")
+	}
+
+	rule := &ignoreRule{
+		lineNum:    lineNum,
+		raw:        trimmed,
+		change:     change,
+		msg:        msg,
+		fullReason: rem,
+	}
+
+	if isKeyChange(change) {
+		if rem[0] == '"' {
+			q, after, err := unquotePrefix(rem)
+			if err == nil && strings.TrimSpace(after) != "" {
+				rule.key = q
+				rule.fullReason = strings.TrimSpace(after)
+				return rule, nil
+			}
+		}
+		nextSp := strings.IndexAny(rem, " \t")
+		if nextSp > 0 {
+			firstWord := rem[:nextSp]
+			restAfterWord := strings.TrimSpace(rem[nextSp:])
+			if restAfterWord != "" {
+				rule.candKey = firstWord
+				rule.candReason = restAfterWord
+			}
+		}
+	}
+	return rule, nil
+}
+
+func applyIgnores(r *Report, rules []*ignoreRule) {
+	if len(rules) == 0 {
+		return
+	}
+	for i := range r.Findings {
+		f := &r.Findings[i]
+		for _, rule := range rules {
+			if rule.change != f.Change || rule.msg != f.Message {
+				continue
+			}
+			matched := false
+			reason := rule.fullReason
+			if isKeyChange(rule.change) {
+				if rule.key != "" {
+					if rule.key == f.Key {
+						matched = true
+					}
+				} else if rule.candKey != "" && rule.candKey == f.Key {
+					matched = true
+					reason = rule.candReason
+				} else if rule.candKey == "" {
+					matched = true
+				}
+			} else {
+				matched = true
+			}
+			if matched {
+				f.Ignored = true
+				f.IgnoreReason = reason
+				rule.matched = true
+			}
+		}
+	}
+	for _, rule := range rules {
+		if !rule.matched {
+			r.StaleIgnores = append(r.StaleIgnores, rule.raw)
+		}
+	}
+}
+
 func refPath(p string) string { return filepath.ToSlash(p) }
 
 // findMessage returns the ref lines that contain a message. Templates are
@@ -1513,29 +1719,33 @@ func keyInQueryPosition(l, key string) bool {
 // Comparing.
 
 type Finding struct {
-	Severity string   `json:"severity"`
-	Change   string   `json:"change"`
-	Message  string   `json:"message"`
-	Key      string   `json:"key,omitempty"`
-	Detail   string   `json:"detail"`
-	Pos      string   `json:"pos"`
-	Refs     []string `json:"refs,omitempty"`
+	Severity     string   `json:"severity"`
+	Change       string   `json:"change"`
+	Message      string   `json:"message"`
+	Key          string   `json:"key,omitempty"`
+	Detail       string   `json:"detail"`
+	Pos          string   `json:"pos"`
+	Refs         []string `json:"refs,omitempty"`
+	Ignored      bool     `json:"ignored,omitempty"`
+	IgnoreReason string   `json:"ignore_reason,omitempty"`
 }
 
 type Report struct {
-	Old        string    `json:"old"`
-	New        string    `json:"new"`
-	OldEvents  int       `json:"old_events"`
-	NewEvents  int       `json:"new_events"`
-	OldCalls   int       `json:"old_calls"`
-	NewCalls   int       `json:"new_calls"`
-	Libraries  []string  `json:"libraries"`
-	RefFiles   []string  `json:"ref_files,omitempty"`
-	Findings   []Finding `json:"findings"`
-	NotChecked []string  `json:"not_checked,omitempty"`
-	Breaks     int       `json:"breaks"`
-	Warnings   int       `json:"warnings"`
-	Infos      int       `json:"infos"`
+	Old          string    `json:"old"`
+	New          string    `json:"new"`
+	OldEvents    int       `json:"old_events"`
+	NewEvents    int       `json:"new_events"`
+	OldCalls     int       `json:"old_calls"`
+	NewCalls     int       `json:"new_calls"`
+	Libraries    []string  `json:"libraries"`
+	RefFiles     []string  `json:"ref_files,omitempty"`
+	Findings     []Finding `json:"findings"`
+	NotChecked   []string  `json:"not_checked,omitempty"`
+	StaleIgnores []string  `json:"stale_ignores,omitempty"`
+	Breaks       int       `json:"breaks"`
+	Warnings     int       `json:"warnings"`
+	Infos        int       `json:"infos"`
+	Ignored      int       `json:"ignored,omitempty"`
 }
 
 func compare(o options) (*Report, error) {
@@ -1599,6 +1809,7 @@ func compare(o options) (*Report, error) {
 	if f := diffEvents(oldEv, newEv, refs); f != nil {
 		r.Findings = f
 	}
+	applyIgnores(r, o.ignoreRules)
 	if len(oldS.dynamic)+len(newS.dynamic) > 0 {
 		ex, at := firstDynamic(newS, oldS)
 		r.NotChecked = append(r.NotChecked, fmt.Sprintf("%d call sites with a message that isn't a constant (old %d, new %d), such as %s at %s",
@@ -1619,6 +1830,10 @@ func compare(o options) (*Report, error) {
 		r.NotChecked = append(r.NotChecked, fmt.Sprintf("attributes that aren't constant keys (a spread args..., a variable, WithGroup or a helper) in %d old and %d new messages", dynOld, dynNew))
 	}
 	for _, f := range r.Findings {
+		if f.Ignored {
+			r.Ignored++
+			continue
+		}
 		switch f.Severity {
 		case sevBreak:
 			r.Breaks++
@@ -1900,7 +2115,11 @@ func printText(w io.Writer, r *Report) {
 		if f.Key != "" {
 			target += " " + f.Key
 		}
-		fmt.Fprintf(w, "  %-5s %s %s\n", strings.ToUpper(f.Severity), f.Change, target)
+		if f.Ignored {
+			fmt.Fprintf(w, "  %-5s %s %s (ignored: %s)\n", strings.ToUpper(f.Severity), f.Change, target, f.IgnoreReason)
+		} else {
+			fmt.Fprintf(w, "  %-5s %s %s\n", strings.ToUpper(f.Severity), f.Change, target)
+		}
 		fmt.Fprintf(w, "        %s\n", f.Detail)
 		if f.Pos != "" {
 			if strings.HasPrefix(f.Pos, "was ") {
@@ -1922,10 +2141,16 @@ func printText(w io.Writer, r *Report) {
 	for _, n := range r.NotChecked {
 		fmt.Fprintf(w, "  not checked: %s\n", n)
 	}
+	for _, s := range r.StaleIgnores {
+		fmt.Fprintf(w, "  stale ignore: %s\n", s)
+	}
 	if r.Breaks == 0 && r.Warnings == 0 {
 		fmt.Fprintf(w, "  no changes to existing log messages, keys or levels")
 		if r.Infos > 0 {
 			fmt.Fprintf(w, " (%s)", plural(r.Infos, "addition"))
+		}
+		if r.Ignored > 0 {
+			fmt.Fprintf(w, " (%s ignored)", plural(r.Ignored, "finding"))
 		}
 		fmt.Fprintln(w)
 		return

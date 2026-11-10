@@ -159,6 +159,7 @@ func TestFlagErrors(t *testing.T) {
 		{"--old", "a", "--fail-on", "break"},
 		{"--list", "--old", "a"},
 		{"--list", "--refs", "x"},
+		{"--list", "--ignore", "x"},
 		{"--old", "a", "extra"},
 		{"--nope"},
 	}
@@ -174,5 +175,77 @@ func TestFlagErrors(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"--version"}, &out, &errb); code != 0 || !strings.Contains(out.String(), version) {
 		t.Errorf("--version = %d %q", code, out.String())
+	}
+}
+
+func TestParseIgnoreLine(t *testing.T) {
+	cases := []struct {
+		line       string
+		wantChange string
+		wantMsg    string
+		wantKey    string
+		wantReason string
+		wantErr    bool
+	}{
+		{
+			line:       `message-changed "payment failed" alert updated in rules.yaml`,
+			wantChange: "message-changed",
+			wantMsg:    "payment failed",
+			wantReason: "alert updated in rules.yaml",
+		},
+		{
+			line:       `key-removed "payment failed" amount alert updated in rules.yaml`,
+			wantChange: "key-removed",
+			wantMsg:    "payment failed",
+			wantKey:    "amount",
+			wantReason: "alert updated in rules.yaml",
+		},
+		{
+			line:       `key-removed "payment failed" "order_id" alert updated`,
+			wantChange: "key-removed",
+			wantMsg:    "payment failed",
+			wantKey:    "order_id",
+			wantReason: "alert updated",
+		},
+		{
+			line:    `bad-change "msg" reason`,
+			wantErr: true,
+		},
+		{
+			line:    `message-changed`,
+			wantErr: true,
+		},
+		{
+			line:    `message-changed "unclosed reason`,
+			wantErr: true,
+		},
+		{
+			line:    `message-changed "msg"`,
+			wantErr: true,
+		},
+	}
+	for _, c := range cases {
+		rule, err := parseIgnoreLine(c.line, 1)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseIgnoreLine(%q) expected error, got nil", c.line)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("parseIgnoreLine(%q) unexpected error: %v", c.line, err)
+		}
+		if rule.change != c.wantChange || rule.msg != c.wantMsg {
+			t.Errorf("parseIgnoreLine(%q) = (%q, %q), want (%q, %q)", c.line, rule.change, rule.msg, c.wantChange, c.wantMsg)
+		}
+		key := rule.key
+		reason := rule.fullReason
+		if rule.candKey != "" {
+			key = rule.candKey
+			reason = rule.candReason
+		}
+		if key != c.wantKey || reason != c.wantReason {
+			t.Errorf("parseIgnoreLine(%q) key/reason = (%q, %q), want (%q, %q)", c.line, key, reason, c.wantKey, c.wantReason)
+		}
 	}
 }
