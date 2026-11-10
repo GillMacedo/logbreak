@@ -129,22 +129,26 @@ func writeModule(t *testing.T, files map[string]string) string {
 }
 
 type report struct {
-	OldEvents  int      `json:"old_events"`
-	NewEvents  int      `json:"new_events"`
-	Libraries  []string `json:"libraries"`
-	RefFiles   []string `json:"ref_files"`
-	NotChecked []string `json:"not_checked"`
-	Breaks     int      `json:"breaks"`
-	Warnings   int      `json:"warnings"`
-	Infos      int      `json:"infos"`
-	Findings   []struct {
-		Severity string   `json:"severity"`
-		Change   string   `json:"change"`
-		Message  string   `json:"message"`
-		Key      string   `json:"key"`
-		Detail   string   `json:"detail"`
-		Pos      string   `json:"pos"`
-		Refs     []string `json:"refs"`
+	OldEvents    int      `json:"old_events"`
+	NewEvents    int      `json:"new_events"`
+	Libraries    []string `json:"libraries"`
+	RefFiles     []string `json:"ref_files"`
+	NotChecked   []string `json:"not_checked"`
+	StaleIgnores []string `json:"stale_ignores"`
+	Breaks       int      `json:"breaks"`
+	Warnings     int      `json:"warnings"`
+	Infos        int      `json:"infos"`
+	Ignored      int      `json:"ignored"`
+	Findings     []struct {
+		Severity     string   `json:"severity"`
+		Change       string   `json:"change"`
+		Message      string   `json:"message"`
+		Key          string   `json:"key"`
+		Detail       string   `json:"detail"`
+		Pos          string   `json:"pos"`
+		Refs         []string `json:"refs"`
+		Ignored      bool     `json:"ignored"`
+		IgnoreReason string   `json:"ignore_reason"`
 	} `json:"findings"`
 }
 
@@ -468,5 +472,72 @@ func TestOwnModuleIsRefused(t *testing.T) {
 	r := runTool(t, "--old", "..", "--new", "..")
 	if r.code != 2 || !strings.Contains(r.stderr, "no slog, zap or logr calls") {
 		t.Errorf("own module: exit %d\n%s", r.code, r.stderr)
+	}
+}
+
+func TestIgnoreMatchingLine(t *testing.T) {
+	ignoreDir := t.TempDir()
+	ignoreFile := filepath.Join(ignoreDir, "logbreak.ignore")
+	os.WriteFile(ignoreFile, []byte("message-changed \"payment failed\" alert updated in rules.yaml\n"), 0o644)
+
+	r := runTool(t, "--old", example(t, "checkout-v1"), "--new", example(t, "checkout-v2"), "--refs", example(t, "alerts"), "--ignore", ignoreFile, "--format", "json")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	rep := parseReport(t, r)
+	var found bool
+	for _, f := range rep.Findings {
+		if f.Message == "payment failed" && f.Change == "message-changed" {
+			found = true
+			if !f.Ignored {
+				t.Errorf("finding %q was not ignored in JSON", f.Message)
+			}
+			if f.IgnoreReason != "alert updated in rules.yaml" {
+				t.Errorf("finding %q ignore_reason = %q, want 'alert updated in rules.yaml'", f.Message, f.IgnoreReason)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("finding 'payment failed' message-changed not found in report")
+	}
+
+	// Test text format output contains "(ignored: alert updated in rules.yaml)"
+	rText := runTool(t, "--old", example(t, "checkout-v1"), "--new", example(t, "checkout-v2"), "--refs", example(t, "alerts"), "--ignore", ignoreFile)
+	if !strings.Contains(rText.stdout, "(ignored: alert updated in rules.yaml)") {
+		t.Errorf("text output missing ignore notice:\n%s", rText.stdout)
+	}
+}
+
+func TestIgnoreStaleLine(t *testing.T) {
+	ignoreDir := t.TempDir()
+	ignoreFile := filepath.Join(ignoreDir, "logbreak.ignore")
+	os.WriteFile(ignoreFile, []byte("message-changed \"nonexistent message\" old change\n"), 0o644)
+
+	r := runTool(t, "--old", example(t, "checkout-v1"), "--new", example(t, "checkout-v2"), "--refs", example(t, "alerts"), "--ignore", ignoreFile, "--format", "json")
+	rep := parseReport(t, r)
+	if len(rep.StaleIgnores) == 0 {
+		t.Errorf("expected stale ignore in report, got none")
+	} else if !strings.Contains(rep.StaleIgnores[0], "nonexistent message") {
+		t.Errorf("expected stale ignore mentioning 'nonexistent message', got %v", rep.StaleIgnores)
+	}
+
+	// Text mode test
+	rText := runTool(t, "--old", example(t, "checkout-v1"), "--new", example(t, "checkout-v2"), "--refs", example(t, "alerts"), "--ignore", ignoreFile)
+	if !strings.Contains(rText.stdout, "stale ignore:") || !strings.Contains(rText.stdout, "nonexistent message") {
+		t.Errorf("text output missing stale ignore report:\n%s", rText.stdout)
+	}
+}
+
+func TestIgnoreMalformedFile(t *testing.T) {
+	ignoreDir := t.TempDir()
+	badFile := filepath.Join(ignoreDir, "malformed.ignore")
+	os.WriteFile(badFile, []byte("bad-change-type \"foo\" some reason\n"), 0o644)
+
+	r := runTool(t, "--old", example(t, "checkout-v1"), "--new", example(t, "checkout-v2"), "--ignore", badFile)
+	if r.code != 2 {
+		t.Errorf("malformed ignore file: exit %d, want 2\n%s", r.code, r.stderr)
+	}
+	if r.stdout != "" {
+		t.Errorf("malformed ignore file produced stdout: %s", r.stdout)
 	}
 }
