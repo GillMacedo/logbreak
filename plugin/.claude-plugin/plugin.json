@@ -1,0 +1,13 @@
+{
+  "name": "logbreak",
+  "version": "0.1.0",
+  "description": "Find Go logging changes that silently break log-based alerts and dashboards: reworded or removed log messages, renamed or removed attribute keys, values that changed kind, and levels that went up or down. Reads log/slog, zap and logr calls at two revisions and searches your alert rules for what changed.",
+  "author": {
+    "name": "Giulliano Macedo",
+    "url": "https://github.com/GillMacedo"
+  },
+  "homepage": "https://github.com/GillMacedo/logbreak",
+  "repository": "https://github.com/GillMacedo/logbreak",
+  "license": "MIT",
+  "keywords": ["go", "golang", "logging", "slog", "zap", "logr", "log-based-alerts", "observability", "code-review", "loki", "structured-logging"]
+}

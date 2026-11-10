@@ -1,0 +1,14 @@
+{
+  "name": "logbreak-marketplace",
+  "description": "Marketplace for logbreak, which finds Go logging changes that break log-based alerts and dashboards.",
+  "owner": {
+    "name": "Giulliano Macedo"
+  },
+  "plugins": [
+    {
+      "name": "logbreak",
+      "source": "./plugin",
+      "description": "Compare the log events a Go module writes at two revisions (slog, zap, logr) and report reworded messages, renamed keys, changed value kinds and level changes, marking the ones your alert rules use."
+    }
+  ]
+}

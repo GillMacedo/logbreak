@@ -1,0 +1,11 @@
+{
+  "title": "Checkout (made up)",
+  "panels": [
+    {
+      "title": "Invalid amounts by order",
+      "targets": [
+        { "expr": "{app=\"checkout\"} | json | msg=\"invalid amount\" | line_format \"{{.order_id}}\"" }
+      ]
+    }
+  ]
+}

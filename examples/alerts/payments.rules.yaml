@@ -1,0 +1,12 @@
+# Made-up Loki ruler alerts for the checkout example.
+groups:
+  - name: payments
+    rules:
+      - alert: PaymentFailuresHigh
+        expr: |
+          sum(count_over_time({app="checkout"} | json | msg="payment failed" [5m])) > 10
+        for: 5m
+      - alert: RefundProviderDown
+        expr: |
+          sum(count_over_time({app="checkout"} | json | level="ERROR" | msg="refund provider error" | status >= 500 [5m])) > 3
+        for: 10m

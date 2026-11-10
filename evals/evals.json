@@ -1,0 +1,29 @@
+[
+  {
+    "skills": ["checking-log-event-compatibility"],
+    "query": "Does this PR break any of our log-based alerts?",
+    "expected_behavior": [
+      "Finds the merge base with git merge-base and runs logbreak with --base and the module directory",
+      "Looks for alert rule or dashboard files in the repo and passes them with --refs",
+      "Lists each BREAK with the message, key, file line and the ref line that uses it",
+      "Treats exit code 2 as unknown and shows the error instead of calling it a pass"
+    ]
+  },
+  {
+    "skills": ["checking-log-event-compatibility"],
+    "query": "Our 'payment failed' alert in Loki went quiet after Tuesday's deploy. Did someone change the log line?",
+    "expected_behavior": [
+      "Runs logbreak with --base set to the previous release or deploy commit",
+      "Reports whether the message was removed, reworded, moved to another level or lost a key",
+      "Says that a message-changed finding is a guess and checks the code before calling it a rewording"
+    ]
+  },
+  {
+    "skills": ["checking-log-event-compatibility"],
+    "query": "Which log messages and keys does our order service write, so I can build a dashboard?",
+    "expected_behavior": [
+      "Runs logbreak --list on the module",
+      "Mentions call sites with messages that aren't constants, which the list leaves out"
+    ]
+  }
+]
